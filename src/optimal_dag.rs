@@ -11,7 +11,7 @@
 //! conditional backups to descendants of the selected depth-4 state.
 
 // `Val` is f64 natively and f32 on wasm; explicit `as f64` conversions are intentionally shared
-// by both builds so the algorithm stays one source path.
+// by both builds so the algorithm stays one sFource path.
 #![allow(clippy::unnecessary_cast)]
 
 use anyhow::{bail, Result};
@@ -60,6 +60,7 @@ impl Instant {
 
 use crate::graph::{Graph as FieldGraph, MAX_HASH, TWO_LINE_HASH};
 use crate::optimal::{boundary_key, VStarTable};
+use crate::score::piece_char;
 
 // Per-depth ns spent inside cond_backup, summed across leaves (index 10 = the depth-10 seed).
 // Diagnostics only, dumped by build_cond_full under VS_CONDBENCH; native builds only.
@@ -2739,16 +2740,18 @@ impl<'a> ExactDagSolution<'a> {
         self.stats
     }
 
-    /// Stream the complete reveal-conditioned policy in the bundled tree viewer's format.
+    /// The `init_hash` header of the empty-DAG policy, which is always 0.
+    #[inline]
+    pub fn init_hash(&self) -> u64 {
+        0
+    }
+
+    /// Stream the complete reveal-conditioned policy as a piece-keyed JSON root node subtree.
     ///
     /// CondFull directly selects depths 0..3.  Once the first four reveals are known, one
     /// conditional deep backup is built, streamed, and dropped before the next reveal leaf.  The
     /// scratch arrays and structural indexes are reused across leaves to keep peak memory bounded.
-    pub fn write_tree_data(&self, mut output: impl Write) -> io::Result<()> {
-        writeln!(output, "init_hash=0")?;
-        writeln!(output, "objective=\"expected_pc\"")?;
-        write!(output, "data=")?;
-
+    pub fn write_root_json(&self, mut output: impl Write) -> io::Result<()> {
         let retained = &self.search.retained;
         let mut workspace = TreeWorkspace {
             suffix: build_cond_suffix(),
@@ -2757,7 +2760,7 @@ impl<'a> ExactDagSolution<'a> {
             blocks: self.search.reveal_edge_blocks(),
             reset: ResetEval::new(self.vstar),
         };
-        self.write_tree_state(
+        self.write_tree_state_json(
             retained.dag.root,
             0,
             0,
@@ -2783,7 +2786,7 @@ impl<'a> ExactDagSolution<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn write_tree_state(
+    fn write_tree_state_json(
         &self,
         node: NodeId,
         depth: u8,
@@ -2805,19 +2808,27 @@ impl<'a> ExactDagSolution<'a> {
             &next_reveals[..next_len],
             deep,
         ) else {
-            return output.write_all(b"[-1,-1,0]");
+            return output.write_all(b"0");
         };
         let child_key = self.search.retained.dag.nodes[child].key;
-        write!(output, "[{},{},{},[", child_key.field, placed, score)?;
-
+        write!(
+            output,
+            "{{\"hash\":{},\"piece\":\"{}\",\"value\":{},",
+            child_key.field,
+            piece_char(placed),
+            score
+        )?;
+        write!(output, "\"children\":{{")?;
+        let mut first = true;
         for revealed in 0u8..PIECE_COUNT as u8 {
-            if revealed != 0 {
-                output.write_all(b",")?;
-            }
             if bag & (1 << revealed) == 0 {
-                output.write_all(b"null")?;
                 continue;
             }
+            if !first {
+                output.write_all(b",")?;
+            }
+            first = false;
+            write!(output, "\"{}\":", piece_char(revealed))?;
 
             let next_queue = [queue[1], queue[2], queue[3], queue[4], queue[5], revealed];
             let next_bag = after_reveal(bag, revealed);
@@ -2831,14 +2842,14 @@ impl<'a> ExactDagSolution<'a> {
                             "V* table is missing a terminal boundary while writing the tree",
                         )
                     })?;
-                write!(output, "[[{}]]", 1.0 + f64::from(value))?;
+                write!(output, "{value}", value = 1.0 + f64::from(value))?;
                 continue;
             }
 
             if depth < 3 {
                 let mut next_hidden = hidden;
                 next_hidden[depth as usize] = revealed;
-                self.write_tree_state(
+                self.write_tree_state_json(
                     child,
                     depth + 1,
                     set_hidden(hidden_pack, depth, revealed),
@@ -2857,7 +2868,7 @@ impl<'a> ExactDagSolution<'a> {
                 let full_pack = set_hidden(hidden_pack, 3, revealed);
                 debug_assert!(self.search.retained.ranges.contains_key(&(4, full_pack)));
                 let branch = self.build_deep_policy(child, next_hidden, workspace)?;
-                self.write_tree_state(
+                self.write_tree_state_json(
                     child,
                     4,
                     full_pack,
@@ -2873,7 +2884,7 @@ impl<'a> ExactDagSolution<'a> {
             } else {
                 let mut reveals = next_reveals;
                 reveals[next_len] = revealed;
-                self.write_tree_state(
+                self.write_tree_state_json(
                     child,
                     depth + 1,
                     hidden_pack,
@@ -2888,7 +2899,7 @@ impl<'a> ExactDagSolution<'a> {
                 )?;
             }
         }
-        output.write_all(b"]]")
+        write!(output, "}}}}")
     }
 
     fn select_action(
@@ -3159,7 +3170,7 @@ mod local_oracle_check {
         assert!((score - solution.root_value()).abs() < 1e-12);
 
         let started = std::time::Instant::now();
-        solution.write_tree_data(io::sink()).unwrap();
+        solution.write_root_json(io::sink()).unwrap();
         eprintln!("tree streamed in {:.3}s", started.elapsed().as_secs_f64());
     }
 }

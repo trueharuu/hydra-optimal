@@ -101,9 +101,10 @@ printf '%s\n' 'IJLOSTZ IJLOSTZ' |
   ./target/release/zxcl-optimal-solver --graph ./graph.bin -d
 ```
 
-This writes `tree_data.js` in the current working directory. Open the included `tree_viewer.html` in
-a browser to inspect it; `tree_viewer.html`, `main.js`, and the generated `tree_data.js` need to be
-in the same directory. A later decision query replaces `tree_data.js`.
+This writes `tree_data.js` (a single `tree_data=...` object literal: mode, initial field hash, root
+node, and a reveal-conditioned tree where each node's `children` are keyed by the revealed piece) in
+the current working directory. A later decision query replaces it. The value at any node is stored as
+a plain JSON number.
 
 #### V*-optimal mode
 
@@ -146,15 +147,13 @@ after every placement, including the placement that completes the PC, then score
 boundary as `1 + V*(next state)`. These extra reveal branches are required because pieces seen late
 in one PC become the next PC's queue.
 
-When `-d` is present, the generated file includes `objective="expected_pc"`, `survival_success`,
-and `survival_total`. The bundled viewer shows the independently optimized Baseline survival
-probability above the V* policy tree, including a percentage rounded to three decimal places. It
-uses the objective metadata to display positive expected-PC scores directly; legacy immediate-PC
-trees have no objective or survival metadata and retain their original failure-cost display
-convention.
+When `-d` is present, the generated `tree_data.js` carries the V* policy: a top-level
+`{"mode":"optimal","init_hash":...,"root":...}` object in which every terminal and no-action leaf is
+a bare number and the reveal-conditioned children map keys terminal values by piece. The survival
+report is not stored in the file; it stays on stderr as `Survival: N/M`.
 
 An optimal tree can be much larger than an immediate-PC tree. Empty-field queries use an exact
-layered-DAG engine; the full oracle below peaks around 1.5–1.6 GiB and writes a 33.1 MB tree on the
+layered-DAG engine; the full oracle below peaks around 1.5–1.6 GiB and writes a 41.0 MB tree on the
 development machine. Custom `-f` starts use a general state-memoized fallback because their relative
 reveal horizon differs. They are exact too, but a difficult middle layer can use more time and
 memory. The late-layer example above is the quickest way to check a build.
@@ -271,10 +270,12 @@ non-negative values before searching.
 
 - Regular, boolean, decision, weighted, two-line, custom-field, and `see` modes use the original
   input and result conventions.
-- Decision output uses the original `tree_data.js` schema and included viewer.
+- Decision output uses the piece-keyed `tree_data.js` schema (a single `tree_data=...` object literal)
+  with `hash`/`piece`/`value` node objects, reveal-keyed `children` maps, and bare-number terminal
+  leaves.
 - `--optimal` is a Rust-port extension. It requires `-s 7`, automatically recognizes both PC
   terminal fields, and also reports the baseline four-line survival probability. Add `-d`
-  to write positive expected-PC scores with an objective metadata header.
+  to write the positive expected-PC policy tree to `tree_data.js`.
 - Empty-field optimal searches use a pruned exact DAG with reveal-vector backups. A non-empty `-f`
   field uses the general full-state fallback so arbitrary relative horizons remain correct.
 - Root search may use multiple threads, but numerical results and decision tie-breaking remain
@@ -344,14 +345,12 @@ After building the release binary and downloading `graph.bin`, run the small com
 scripts/oracle_smoke.sh ./graph.bin ./target/release/zxcl-optimal-solver
 ```
 
-The smoke script compares known normal, boolean, weighted, two-line, and `see 11` results, checks
-legacy decision mode against an exact known `tree_data.js` payload, rejects invalid optimal-mode
-combinations, checks score-only optimal mode and its classic survival result, and runs a fast
-late-layer V*-optimal tree oracle. The solver checks invoke only the
-Rust binary, read the graph, weights, and V* table without modifying them, write decision output in a
-temporary directory, and do not need the C++ repository or executable. When `node` is available,
-it also checks that the viewer can render a zero-step V* terminal; that optional check is skipped
-otherwise.
+The smoke script checks the known normal, boolean, weighted, two-line, and `see 11` results, rejects
+invalid optimal-mode combinations, checks decision mode and score-only/V*-optimal mode against exact
+`tree_data.js` payloads, and runs a fast late-layer V*-optimal tree oracle. The solver checks invoke
+only the Rust binary, read the graph, weights, and V* table without modifying them, write decision
+output in a temporary directory, and do not need the C++ repository or executable. Set
+`ZXCL_FULL_ORACLE=1` to additionally verify the full empty-field V* tree by byte length and SHA-256.
 
 Set `ZXCL_FULL_ORACLE=1` to additionally solve the empty-field exact oracle and compare its entire
 33,123,379-byte tree by SHA-256. `ZXCL_FULL_THREADS` selects its thread count:

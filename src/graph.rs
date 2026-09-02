@@ -140,7 +140,7 @@ fn parse_graph(bytes: &[u8], fields: usize, edge_capacity: usize) -> Result<Grap
             if pos + target_len > bytes.len() {
                 bail!("truncated targets at field {field}, piece {piece}");
             }
-            for target in bytes[pos..pos + target_len].chunks_exact(TARGET_BYTES) {
+            for target in bytes[pos..pos + target_len].as_chunks::<TARGET_BYTES>().0 {
                 let target = read_u24_le(target);
                 if target as usize >= fields {
                     bail!("target {target} is out of range at field {field}, piece {piece}");

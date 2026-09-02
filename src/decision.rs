@@ -1,8 +1,7 @@
 use crate::graph::{Graph, PC_COMPLETE_ID};
-use crate::score::{pieces, Cost, MinArray, Weights, FULL_BAG};
+use crate::score::{piece_char, pieces, Cost, MinArray, Weights, FULL_BAG};
 use std::array;
 use std::collections::VecDeque;
-use std::fmt;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -48,23 +47,74 @@ impl<T: Cost> Decision<T> {
         self.cap
     }
 
-    /// Format the tree using the JavaScript array syntax consumed by `tree_viewer.html`.
-    pub fn display<'a>(&'a self, graph: &'a Graph) -> DecisionDisplay<'a, T> {
-        DecisionDisplay {
-            decision: self,
-            graph,
-        }
+    /// Stream the decision tree as a piece-keyed JSON root node subtree.
+    ///
+    /// Each node stores the post-placement field hash, the placed piece, and the scalar cost; the
+    /// children map is keyed by reveal piece and omits pieces hidden by the current bag.
+    pub fn write_root_json(&self, graph: &Graph, output: &mut impl Write) -> io::Result<()> {
+        self.write_node_json(&|field| graph.hash(field), output)
     }
 
-    /// Write a complete `tree_data.js` payload without allocating the serialized tree string.
-    pub fn write_tree_data(
+    fn write_node_json(
         &self,
-        graph: &Graph,
-        initial_field: u32,
-        mut output: impl Write,
+        hash: &impl Fn(u32) -> u64,
+        output: &mut impl Write,
     ) -> io::Result<()> {
-        writeln!(output, "init_hash={}", graph.hash(initial_field))?;
-        write!(output, "data={}", self.display(graph))
+        match &self.kind {
+            DecisionKind::Branch {
+                field,
+                piece,
+                children,
+            } if self.cost < self.cap => {
+                write!(
+                    output,
+                    "{{\"hash\":{},\"piece\":\"{}\",\"value\":{},",
+                    hash(*field),
+                    piece_char(*piece),
+                    self.cost.scaled_output()
+                )?;
+                write!(output, "\"children\":{{")?;
+                let mut first = true;
+                for (index, child) in children.iter().enumerate() {
+                    let Some(child) = child else {
+                        continue;
+                    };
+                    if !first {
+                        output.write_all(b",")?;
+                    }
+                    first = false;
+                    write!(output, "\"{}\":", piece_char(index as u8))?;
+                    child.write_node_json(hash, output)?;
+                }
+                write!(output, "}}}}")
+            }
+            DecisionKind::Solve { steps } => {
+                write!(output, "{{\"value\":{}", self.cost.scaled_output())?;
+                if !steps.is_empty() {
+                    write!(output, ",\"steps\":[")?;
+                    for (index, step) in steps.iter().enumerate() {
+                        if index != 0 {
+                            output.write_all(b",")?;
+                        }
+                        write!(
+                            output,
+                            "{{\"hash\":{},\"piece\":\"{}\"}}",
+                            hash(step.field),
+                            piece_char(step.piece)
+                        )?;
+                    }
+                    write!(output, "]")?;
+                }
+                write!(output, "}}")
+            }
+            DecisionKind::Branch { .. } | DecisionKind::Capped => {
+                write!(
+                    output,
+                    "{{\"value\":{},\"capped\":true}}",
+                    self.cap.scaled_output()
+                )
+            }
+        }
     }
 
     fn capped(cost: T, cap: T) -> Self {
@@ -100,60 +150,6 @@ impl<T: Cost> Decision<T> {
             unreachable!("children are only valid on branch decisions");
         };
         children[piece as usize] = Some(Box::new(child));
-    }
-
-    fn fmt_with_hash(
-        &self,
-        output: &mut fmt::Formatter<'_>,
-        hash: &impl Fn(u32) -> u64,
-    ) -> fmt::Result {
-        match &self.kind {
-            DecisionKind::Branch {
-                field,
-                piece,
-                children,
-            } if self.cost < self.cap => {
-                write!(
-                    output,
-                    "[{},{},{},[",
-                    hash(*field),
-                    piece,
-                    self.cost.scaled_output()
-                )?;
-                for (index, child) in children.iter().enumerate() {
-                    if index != 0 {
-                        output.write_str(",")?;
-                    }
-                    match child {
-                        Some(child) => child.fmt_with_hash(output, hash)?,
-                        None => output.write_str("null")?,
-                    }
-                }
-                output.write_str("]]")
-            }
-            DecisionKind::Solve { steps } => {
-                write!(output, "[[{}]", self.cost.scaled_output())?;
-                for step in steps {
-                    write!(output, ",[{},{}]", hash(step.field), step.piece)?;
-                }
-                output.write_str("]")
-            }
-            DecisionKind::Branch { .. } | DecisionKind::Capped => {
-                write!(output, "[-1,-1,{}]", self.cap.scaled_output())
-            }
-        }
-    }
-}
-
-pub struct DecisionDisplay<'a, T: Cost> {
-    decision: &'a Decision<T>,
-    graph: &'a Graph,
-}
-
-impl<T: Cost> fmt::Display for DecisionDisplay<'_, T> {
-    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.decision
-            .fmt_with_hash(output, &|field| self.graph.hash(field))
     }
 }
 
@@ -592,16 +588,16 @@ fn root_candidate_wins<T: Cost>(
 mod tests {
     use super::*;
 
-    struct TestDisplay<'a, T: Cost>(&'a Decision<T>);
-
-    impl<T: Cost> fmt::Display for TestDisplay<'_, T> {
-        fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-            self.0.fmt_with_hash(output, &|field| 100 + field as u64)
-        }
+    fn json_string(decision: &Decision<u64>) -> String {
+        let mut output = Vec::new();
+        decision
+            .write_node_json(&|field| 100 + field as u64, &mut output)
+            .unwrap();
+        String::from_utf8(output).unwrap()
     }
 
     #[test]
-    fn serialization_matches_the_original_tree_shape() {
+    fn serialization_is_a_piece_keyed_json_tree() {
         let solve = Decision::solve(
             0u64,
             1,
@@ -621,15 +617,15 @@ mod tests {
         branch.set_child(0, solve);
 
         assert_eq!(
-            TestDisplay(&branch).to_string(),
-            "[103,5,2,[[[0],[110,3],[120,2]],null,null,null,null,null,null]]"
+            json_string(&branch),
+            "{\"hash\":103,\"piece\":\"T\",\"value\":2,\"children\":{\"I\":{\"value\":0,\"steps\":[{\"hash\":110,\"piece\":\"O\"},{\"hash\":120,\"piece\":\"L\"}]}}}"
         );
     }
 
     #[test]
-    fn capped_nodes_use_the_original_sentinel() {
+    fn capped_nodes_use_a_capped_leaf() {
         let capped = Decision::capped(2u64, 7);
-        assert_eq!(TestDisplay(&capped).to_string(), "[-1,-1,7]");
+        assert_eq!(json_string(&capped), "{\"value\":7,\"capped\":true}");
     }
 
     #[test]

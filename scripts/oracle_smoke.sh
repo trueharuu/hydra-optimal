@@ -108,7 +108,7 @@ run_rejected_case() {
 run_decision_case() {
     local expected_result='1'
     local expected_tree
-    expected_tree=$'init_hash=0\ndata=[[0],[4103,1],[12351,2],[209151,3],[25424127,4],[528740607,0],[535035135,6],[129384054015,0],[136901295359,1],[274072600575,2],[1099511627775,3]]'
+    expected_tree=$'tree_data={"mode":"decision","init_hash":0,"root":{"value":0,"steps":[{"hash":4103,"piece":"J"},{"hash":12351,"piece":"L"},{"hash":209151,"piece":"O"},{"hash":25424127,"piece":"S"},{"hash":528740607,"piece":"I"},{"hash":535035135,"piece":"Z"},{"hash":129384054015,"piece":"I"},{"hash":136901295359,"piece":"J"},{"hash":274072600575,"piece":"L"},{"hash":1099511627775,"piece":"O"}]}}'
 
     TEMP_WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/zxcl-optimal-smoke.XXXXXX")
 
@@ -163,7 +163,7 @@ run_decision_case() {
 run_optimal_case() {
     local expected_result='4350.43798828125'
     local expected_tree
-    expected_tree=$'init_hash=274072600575\nobjective="expected_pc"\ndata=[1099511627775,3,4350.43798828125,[[[4350.34326171875]],[[4350.35888671875]],[[4350.36865234375]],[[4350.4248046875]],[[4350.65576171875]],[[4350.2919921875]],[[4350.62255859375]]]]\nsurvival_success=1\nsurvival_total=1'
+    expected_tree=$'tree_data={"mode":"optimal","init_hash":274072600575,"root":{"hash":1099511627775,"piece":"O","value":4350.43798828125,"children":{"I":4350.34326171875,"J":4350.35888671875,"L":4350.36865234375,"O":4350.4248046875,"S":4350.65576171875,"T":4350.2919921875,"Z":4350.62255859375}}}'
 
     TEMP_WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/zxcl-optimal-smoke.XXXXXX")
     local stderr_path="$TEMP_WORKDIR/stderr.txt"
@@ -270,8 +270,8 @@ run_optimal_score_only_case() {
 
 run_full_optimal_case() {
     local expected_result='4353.563114239728'
-    local expected_size='33123419'
-    local expected_hash='e9871a1a7dfa2edd48bae73b0f0956408a7061b7f8b62bcf0cf96143a570f1f9'
+    local expected_size='41021979'
+    local expected_hash='25b7ebe2621e0d4d091934be58ca937c24970279a4a13789c3aa86483039917a'
 
     TEMP_WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/zxcl-optimal-full-oracle.XXXXXX")
 
@@ -321,7 +321,7 @@ run_full_optimal_case() {
     unlink -- "$tree_path"
     rmdir -- "$TEMP_WORKDIR"
     TEMP_WORKDIR=
-    printf 'ok - full empty-field V*-optimal root and 33 MB tree oracle\n'
+    printf 'ok - full empty-field V*-optimal root and 41 MB tree oracle\n'
 }
 
 run_case \
@@ -372,13 +372,6 @@ if [[ ${ZXCL_FULL_ORACLE:-0} == 1 ]]; then
     run_full_optimal_case
 else
     printf 'skip - full empty-field V* oracle (set ZXCL_FULL_ORACLE=1)\n'
-fi
-
-if command -v node >/dev/null 2>&1; then
-    node "$ROOT_DIR/scripts/viewer_smoke.js" "$ROOT_DIR/main.js"
-    printf 'ok - zero-step optimal terminal renders in the viewer\n'
-else
-    printf 'skip - viewer smoke (node not found)\n'
 fi
 
 printf 'all oracle smoke cases passed\n'

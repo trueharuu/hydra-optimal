@@ -6,7 +6,7 @@
 //! complete `(field, hold, queue6, bag)` state and applies the Bellman backup one reveal at a time.
 
 use crate::graph::{Graph, NUM_FIELDS, PC_COMPLETE_ID};
-use crate::score::FULL_BAG;
+use crate::score::{piece_char, FULL_BAG};
 use anyhow::{bail, Context, Result};
 use dashmap::DashMap;
 use std::fs;
@@ -73,7 +73,9 @@ impl VStarTable {
         let mut values = Vec::with_capacity(count);
         let mut previous = None;
         for (index, record) in bytes[VSTAR_HEADER_BYTES..]
-            .chunks_exact(VSTAR_RECORD_BYTES)
+            .as_chunks::<VSTAR_RECORD_BYTES>()
+            .0
+            .iter()
             .enumerate()
         {
             let key = u32::from_le_bytes(record[..4].try_into().expect("4-byte key"));
@@ -576,19 +578,21 @@ impl OptimalSolution<'_> {
         self.stats
     }
 
-    /// Stream a `tree_data.js` payload compatible with the bundled seven-child tree viewer.
-    /// Scores are positive expected-PC values; the objective header lets the updated viewer avoid
-    /// applying the legacy failure-cost negation.
-    pub fn write_tree_data(&self, mut output: impl Write) -> io::Result<()> {
-        writeln!(output, "init_hash={}", self.graph.hash(self.root.field))?;
-        writeln!(output, "objective=\"expected_pc\"")?;
-        write!(output, "data=")?;
-        self.write_state(self.root, &mut output)
+    /// The field hash of the root state, matching the old `init_hash` header.
+    #[inline]
+    pub fn init_hash(&self) -> u64 {
+        self.graph.hash(self.root.field)
     }
 
-    fn write_state(&self, state: SearchState, output: &mut impl Write) -> io::Result<()> {
+    /// Stream the policy as a piece-keyed JSON root node subtree.  Node values are positive
+    /// expected-PC scores; terminal and no-action leaves are bare numbers.
+    pub fn write_root_json(&self, mut output: impl Write) -> io::Result<()> {
+        self.write_state_json(self.root, &mut output)
+    }
+
+    fn write_state_json(&self, state: SearchState, output: &mut impl Write) -> io::Result<()> {
         if self.is_terminal(state.field) {
-            return self.write_terminal(state.hold, state.queue, state.bag, output);
+            return self.write_terminal_json(state.hold, state.queue, state.bag, output);
         }
 
         let state_value = *self.memo.get(&state_key(state)).ok_or_else(|| {
@@ -599,7 +603,7 @@ impl OptimalSolution<'_> {
         })?;
         let action = self.policy_action(state)?;
         if action == NO_ACTION {
-            return output.write_all(b"[-1,-1,0]");
+            return output.write_all(b"0");
         }
 
         let (next_field, used_hold) = decode_action(action);
@@ -608,25 +612,27 @@ impl OptimalSolution<'_> {
         let next_hold = if used_hold { active } else { state.hold };
         write!(
             output,
-            "[{},{},{},[",
+            "{{\"hash\":{},\"piece\":\"{}\",\"value\":{},",
             self.graph.hash(next_field),
-            placed,
+            piece_char(placed),
             state_value
         )?;
-
+        write!(output, "\"children\":{{")?;
+        let mut first = true;
         for revealed in 0u8..7 {
-            if revealed != 0 {
-                output.write_all(b",")?;
-            }
             if state.bag & (1 << revealed) == 0 {
-                output.write_all(b"null")?;
                 continue;
             }
+            if !first {
+                output.write_all(b",")?;
+            }
+            first = false;
+            write!(output, "\"{}\":", piece_char(revealed))?;
             let (next_queue, next_bag) = reveal(state.queue, state.bag, revealed);
             if self.is_terminal(next_field) {
-                self.write_terminal(next_hold, next_queue, next_bag, output)?;
+                self.write_terminal_json(next_hold, next_queue, next_bag, output)?;
             } else {
-                self.write_state(
+                self.write_state_json(
                     SearchState {
                         field: next_field,
                         hold: next_hold,
@@ -637,7 +643,23 @@ impl OptimalSolution<'_> {
                 )?;
             }
         }
-        output.write_all(b"]]")
+        write!(output, "}}}}")
+    }
+
+    fn write_terminal_json(
+        &self,
+        hold: u8,
+        queue: [u8; 6],
+        bag: u8,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        let value = lookup_terminal(self.vstar, hold, queue, bag).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("optimal terminal disappeared during serialization: {error:#}"),
+            )
+        })?;
+        write!(output, "{value}")
     }
 
     /// Recover the strict-first maximizing action from the solved value memo.
@@ -708,22 +730,6 @@ impl OptimalSolution<'_> {
         }
         debug_assert!(count > 0, "canonical bag is nonempty");
         Ok(sum / f64::from(count))
-    }
-
-    fn write_terminal(
-        &self,
-        hold: u8,
-        queue: [u8; 6],
-        bag: u8,
-        output: &mut impl Write,
-    ) -> io::Result<()> {
-        let value = lookup_terminal(self.vstar, hold, queue, bag).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("optimal terminal disappeared during serialization: {error:#}"),
-            )
-        })?;
-        write!(output, "[[{value}]]")
     }
 
     #[inline]
