@@ -2,11 +2,11 @@ use anyhow::Result;
 use rayon::prelude::*;
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{BufWriter, Write};
+use std::io::{self, BufWriter, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use zxcl_optimal_solver::decision::DecisionSearch;
 use zxcl_optimal_solver::graph::Graph;
 use zxcl_optimal_solver::helpers::{make_cutoffs, parse_query_bag, parse_queue};
@@ -38,6 +38,80 @@ struct Task {
     pc: usize,
     queue: String,
     r: usize,
+}
+
+/// Progress shared between the worker pool and the dashboard thread.
+struct Shared {
+    total: usize,
+    processed: AtomicUsize,
+    start: Instant,
+    /// Which PC group is currently being processed (0..7); -1 means finishing.
+    current_pc: AtomicUsize,
+    /// Start of the current PC group.
+    current_pc_start: std::sync::Mutex<Instant>,
+}
+
+impl Shared {
+    fn new(total: usize) -> Self {
+        Self {
+            total,
+            processed: AtomicUsize::new(0),
+            start: Instant::now(),
+            current_pc: AtomicUsize::new(usize::MAX),
+            current_pc_start: std::sync::Mutex::new(Instant::now()),
+        }
+    }
+}
+
+/// Refresh an updating one-line progress indicator on stderr every ~400ms.
+fn run_dashboard(shared: Arc<Shared>, stop: Arc<AtomicUsize>) {
+    let mut last = Instant::now();
+    while stop.load(Ordering::Relaxed) == 0 {
+        let now = Instant::now();
+        if now.duration_since(last) >= Duration::from_millis(400) {
+            render_progress(&shared);
+            last = now;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // final clearing line
+    eprint!("\r\x1b[K");
+    io::stderr().flush().ok();
+}
+
+fn render_progress(shared: &Shared) {
+    let total = shared.total;
+    let done = shared.processed.load(Ordering::Relaxed);
+    let pct = if total == 0 {
+        0.0
+    } else {
+        done as f64 / total as f64 * 100.0
+    };
+    let elapsed = shared.start.elapsed().as_secs_f64();
+    let rate = if elapsed > 0.0 { done as f64 / elapsed } else { 0.0 };
+    let eta = if rate > 0.0 {
+        (total - done) as f64 / rate
+    } else {
+        0.0
+    };
+    let pc = shared.current_pc.load(Ordering::Relaxed);
+    let pc_elapsed = shared
+        .current_pc_start
+        .lock()
+        .expect("current_pc_start lock poisoned")
+        .elapsed()
+        .as_secs_f64();
+    let pc_label = if (1..=7).contains(&pc) {
+        format!("PC {pc} ({pc_elapsed:.0}s)")
+    } else {
+        String::from("finishing")
+    };
+
+    eprint!(
+        "\r{pc_label} | {done}/{total} ({pct:.1}%) {rate:.1}/s ETA {:>7.0}s",
+        eta
+    );
+    io::stderr().flush().ok();
 }
 
 impl Ctx {
@@ -124,14 +198,33 @@ fn run(config: &Config) -> Result<()> {
         }
     }
 
-    let total = tasks.len();
-    let processed = AtomicUsize::new(0);
-    let start = Instant::now();
+    if tasks.is_empty() {
+        return Ok(());
+    }
+
+    let shared = Arc::new(Shared::new(tasks.len()));
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(config.threads)
         .build()
         .expect("failed to build rayon pool");
+
+    // A live updating indicator only makes sense on a real terminal; otherwise emit one line per
+    // finished PC group so redirected/background logs stay clean.
+    let is_tty = io::stderr().is_terminal();
+    let tty_dashboard = if is_tty {
+        let stop = Arc::new(AtomicUsize::new(0));
+        let dashboard_shared = Arc::clone(&shared);
+        let dashboard_stop = Arc::clone(&stop);
+        std::thread::spawn(move || run_dashboard(dashboard_shared, dashboard_stop));
+        Some(stop)
+    } else {
+        None
+    };
+
+    let start = shared.start;
+    let processed = &shared.processed;
+    let mut result: Result<()> = Ok(());
 
     // tasks are grouped by pc since enumerate_queues emits states per pc in order
     let mut task_start = 0usize;
@@ -143,36 +236,65 @@ fn run(config: &Config) -> Result<()> {
         if pc_tasks == 0 {
             continue;
         }
-        println!("PC {pc} ({pc_tasks}):");
-        let pctask_start = Instant::now();
+        if !is_tty {
+            println!("PC {pc} ({pc_tasks}):");
+        }
+        shared.current_pc.store(pc, Ordering::Relaxed);
+        *shared.current_pc_start.lock().expect("poisoned pc start") = Instant::now();
         let pc_processed_before = processed.load(Ordering::Relaxed);
 
-        pool.install(|| {
+        result = pool.install(|| {
             tasks[task_start..task_start + pc_tasks]
                 .par_iter()
-                .for_each(|task| {
-                    let _ = ctx.entry(task);
+                .map(|task| {
+                    let r = ctx.entry(task);
                     processed.fetch_add(1, Ordering::Relaxed);
-                });
+                    r
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(|_| ())
         });
 
-        let done = processed.load(Ordering::Relaxed) - pc_processed_before;
-        let elapsed = pctask_start.elapsed().as_secs_f64();
-        let rate = done as f64 / elapsed;
-        let eta = (total - processed.load(Ordering::Relaxed)) as f64 / rate;
-        eprintln!(
-            "\rPC {pc}: {done}/{pc_tasks} queues ({rate:.1}/s, {elapsed:.1}s) — total {}/{} ({:.1}%), ETA {:.0}s",
-            processed.load(Ordering::Relaxed),
-            total,
-            processed.load(Ordering::Relaxed) as f64 / total as f64 * 100.0,
-            eta,
-        );
+        if !is_tty {
+            let total = shared.total;
+            let done = processed.load(Ordering::Relaxed) - pc_processed_before;
+            let elapsed = start.elapsed().as_secs_f64();
+            let rate = done as f64 / elapsed.max(1e-9);
+            let eta = (total - processed.load(Ordering::Relaxed)) as f64 / rate.max(1e-9);
+            println!(
+                "\rPC {pc}: {done}/{pc_tasks} queues ({rate:.1}/s) — total {}/{} ({:.1}%), ETA {:.0}s",
+                processed.load(Ordering::Relaxed),
+                total,
+                processed.load(Ordering::Relaxed) as f64 / total as f64 * 100.0,
+                eta,
+            );
+        }
+
         task_start += pc_tasks;
+        if result.is_err() {
+            break;
+        }
     }
 
+    shared.current_pc.store(usize::MAX, Ordering::Relaxed);
+
+    if let Some(stop) = tty_dashboard {
+        stop.store(1, Ordering::Relaxed);
+    }
+    let total = shared.total;
     let elapsed = start.elapsed().as_secs_f64();
-    eprintln!("\rDone: {}/{total} queues ({elapsed:.1}s)", processed.load(Ordering::Relaxed));
-    Ok(())
+    if is_tty {
+        eprintln!(
+            "\rDone: {}/{total} queues ({elapsed:.1}s)",
+            processed.load(Ordering::Relaxed)
+        );
+    } else {
+        println!(
+            "Done: {}/{total} queues ({elapsed:.1}s)",
+            processed.load(Ordering::Relaxed)
+        );
+    }
+    result
 }
 
 fn enumerate_queues() -> Vec<QueueState> {
