@@ -36,6 +36,7 @@ struct Ctx {
 /// One solver invocation: a full see-7 queue and its residual first-bag size.
 struct Task {
     pc: usize,
+    name: String,
     queue: String,
     r: usize,
 }
@@ -49,6 +50,12 @@ struct Shared {
     current_pc: AtomicUsize,
     /// Start of the current PC group.
     current_pc_start: std::sync::Mutex<Instant>,
+    /// Current piece identifier being processed.
+    current_name: std::sync::Mutex<String>,
+    /// Total queues for the current piece identifier (major * minor).
+    current_name_total: AtomicUsize,
+    /// Global processed count when the current identifier group began.
+    current_name_start: AtomicUsize,
 }
 
 impl Shared {
@@ -59,16 +66,19 @@ impl Shared {
             start: Instant::now(),
             current_pc: AtomicUsize::new(usize::MAX),
             current_pc_start: std::sync::Mutex::new(Instant::now()),
+            current_name: std::sync::Mutex::new(String::new()),
+            current_name_total: AtomicUsize::new(0),
+            current_name_start: AtomicUsize::new(0),
         }
     }
 }
 
-/// Refresh an updating one-line progress indicator on stderr every ~400ms.
+/// Refresh an updating one-line progress indicator on stderr every ~1s.
 fn run_dashboard(shared: Arc<Shared>, stop: Arc<AtomicUsize>) {
     let mut last = Instant::now();
     while stop.load(Ordering::Relaxed) == 0 {
         let now = Instant::now();
-        if now.duration_since(last) >= Duration::from_millis(400) {
+        if now.duration_since(last) >= Duration::from_millis(1000) {
             render_progress(&shared);
             last = now;
         }
@@ -101,17 +111,57 @@ fn render_progress(shared: &Shared) {
         .expect("current_pc_start lock poisoned")
         .elapsed()
         .as_secs_f64();
+    let name = shared
+        .current_name
+        .lock()
+        .expect("current_name lock poisoned")
+        .clone();
     let pc_label = if (1..=7).contains(&pc) {
-        format!("PC {pc} ({pc_elapsed:.0}s)")
+        let ordinal = match pc {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        };
+        if name.is_empty() {
+            format!("PC {pc}{ordinal} ({pc_elapsed:.0}s)")
+        } else {
+            let total = shared.current_name_total.load(Ordering::Relaxed);
+            let start = shared.current_name_start.load(Ordering::Relaxed);
+            let name_done = done.saturating_sub(start).min(total);
+            format!("{name} {pc}{ordinal} {name_done}/{total} ({pc_elapsed:.0}s)")
+        }
     } else {
         String::from("finishing")
     };
 
     eprint!(
-        "\r{pc_label} | {done}/{total} ({pct:.1}%) {rate:.1}/s ETA {:>7.0}s",
-        eta
+        "\r{pc_label} | {done}/{total} ({pct:.1}%) {rate:.1}/s ETA {:>12}",
+        time_fmt(eta)
     );
     io::stderr().flush().ok();
+}
+
+// Convert a single-unit `seconds` value into a human-readable string like "3d1h2m3s" or "4m5s".
+fn time_fmt(seconds: f64) -> String {
+    let mut remaining = seconds as u64;
+    let days = remaining / 86400;
+    remaining %= 86400;
+    let hours = remaining / 3600;
+    remaining %= 3600;
+    let minutes = remaining / 60;
+    remaining %= 60;
+    let secs = remaining;
+
+    if days > 0 {
+        format!("{days}d{hours}h{minutes}m{secs}s")
+    } else if hours > 0 {
+        format!("{hours}h{minutes}m{secs}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{secs}s")
+    } else {
+        format!("{secs}s")
+    }
 }
 
 impl Ctx {
@@ -176,11 +226,14 @@ fn run(config: &Config) -> Result<()> {
         out_dir: config.out_dir.clone(),
     });
 
+    // Normalize the requested name to the same canonical (sorted) form used in enumerate_queues,
+    // so `--name` accepts any ordering of the group's pieces (e.g. `JLIT` matches `TIJL`).
+    let name = config.name.as_deref().map(sort);
     let all = enumerate_queues();
     let states: Vec<&QueueState> = all
         .iter()
         .filter(|s| config.pc.is_none_or(|pc| s.pc == pc))
-        .filter(|s| config.name.as_deref().is_none_or(|n| s.name == n))
+        .filter(|s| name.as_deref().is_none_or(|n| s.name == *n))
         .collect();
 
     let mut tasks: Vec<Task> = Vec::new();
@@ -191,6 +244,7 @@ fn run(config: &Config) -> Result<()> {
             for minor in minors {
                 tasks.push(Task {
                     pc: state.pc,
+                    name: state.name.clone(),
                     queue: format!("{major}{minor}"),
                     r,
                 });
@@ -226,9 +280,9 @@ fn run(config: &Config) -> Result<()> {
     let processed = &shared.processed;
     let mut result: Result<()> = Ok(());
 
-    // tasks are grouped by pc since enumerate_queues emits states per pc in order
+    // tasks are grouped by pc then by piece identifier since enumerate_queues emits them in order
     let mut task_start = 0usize;
-    for pc in 1..=7 {
+    'outer: for pc in 1..=7 {
         let pc_tasks = tasks[task_start..]
             .iter()
             .take_while(|t| t.pc == pc)
@@ -236,24 +290,53 @@ fn run(config: &Config) -> Result<()> {
         if pc_tasks == 0 {
             continue;
         }
+        shared.current_pc.store(pc, Ordering::Relaxed);
+        *shared.current_pc_start.lock().expect("poisoned pc start") = Instant::now();
+
+        let pc_end = task_start + pc_tasks;
         if !is_tty {
             println!("PC {pc} ({pc_tasks}):");
         }
-        shared.current_pc.store(pc, Ordering::Relaxed);
-        *shared.current_pc_start.lock().expect("poisoned pc start") = Instant::now();
         let pc_processed_before = processed.load(Ordering::Relaxed);
 
-        result = pool.install(|| {
-            tasks[task_start..task_start + pc_tasks]
-                .par_iter()
-                .map(|task| {
-                    let r = ctx.entry(task);
-                    processed.fetch_add(1, Ordering::Relaxed);
-                    r
-                })
-                .collect::<Result<Vec<_>>>()
-                .map(|_| ())
-        });
+        // iterate over piece-identifier groups within this pc, running each group's queues in
+        // parallel and updating the dashboard's current identifier as we go
+        let mut name_start = task_start;
+        while name_start < pc_end {
+            let name = &tasks[name_start].name;
+            *shared
+                .current_name
+                .lock()
+                .expect("poisoned current name") = name.clone();
+            let name_tasks = tasks[name_start..pc_end]
+                .iter()
+                .take_while(|t| t.name == *name)
+                .count();
+            // name_tasks already spans every minor for this identifier (major * minor),
+            // so the identifier's total queue count is exactly name_tasks.
+            shared
+                .current_name_total
+                .store(name_tasks, Ordering::Relaxed);
+            shared
+                .current_name_start
+                .store(processed.load(Ordering::Relaxed), Ordering::Relaxed);
+
+            result = pool.install(|| {
+                tasks[name_start..name_start + name_tasks]
+                    .par_iter()
+                    .map(|task| {
+                        let r = ctx.entry(task);
+                        processed.fetch_add(1, Ordering::Relaxed);
+                        r
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map(|_| ())
+            });
+            name_start += name_tasks;
+            if result.is_err() {
+                break 'outer;
+            }
+        }
 
         if !is_tty {
             let total = shared.total;
@@ -270,10 +353,7 @@ fn run(config: &Config) -> Result<()> {
             );
         }
 
-        task_start += pc_tasks;
-        if result.is_err() {
-            break;
-        }
+        task_start = pc_end;
     }
 
     shared.current_pc.store(usize::MAX, Ordering::Relaxed);
