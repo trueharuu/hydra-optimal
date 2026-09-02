@@ -134,9 +134,10 @@ fn render_progress(shared: &Shared) {
     } else {
         String::from("finishing")
     };
+    let precision = precision_needed_for(total);
 
     eprint!(
-        "\r{pc_label} | {done}/{total} ({pct:.1}%) {rate:.1}/s ETA {:>12}",
+        "\r{pc_label} | {done}/{total} ({pct:.precision$}%) {rate:.1}/s ETA {:>12}",
         time_fmt(eta)
     );
     io::stderr().flush().ok();
@@ -344,8 +345,9 @@ fn run(config: &Config) -> Result<()> {
             let elapsed = start.elapsed().as_secs_f64();
             let rate = done as f64 / elapsed.max(1e-9);
             let eta = (total - processed.load(Ordering::Relaxed)) as f64 / rate.max(1e-9);
+            let precision = precision_needed_for(total);
             println!(
-                "\rPC {pc}: {done}/{pc_tasks} queues ({rate:.1}/s) — total {}/{} ({:.1}%), ETA {:.0}s",
+                "\rPC {pc}: {done}/{pc_tasks} queues ({rate:.1}/s) — total {}/{} ({:.precision$}%), ETA {:.0}s",
                 processed.load(Ordering::Relaxed),
                 total,
                 processed.load(Ordering::Relaxed) as f64 / total as f64 * 100.0,
@@ -412,6 +414,11 @@ fn enumerate_queues() -> Vec<QueueState> {
         }
     }
     states
+}
+
+/// Return the number of decimal digits to reliably represent any fraction with denominator `n` without any `x/n` and `y/n` having the same output.
+fn precision_needed_for(n: usize) -> usize {
+    (n as f64 / 100.0).log10().ceil() as usize + 1
 }
 
 struct Config {
