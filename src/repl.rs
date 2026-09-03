@@ -1,12 +1,12 @@
-use zxcl_optimal_solver::helpers::{make_cutoffs, parse_query_bag, parse_queue, placed_count};
+use solver::helpers::{make_cutoffs, parse_query_bag, parse_queue, placed_count};
 use crate::query::{run_optimal_query, run_search_query, Query, SearchConfig};
 use anyhow::{bail, Context, Result};
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, IsTerminal, Write};
-use zxcl_optimal_solver::graph::{Graph, MAX_HASH};
-use zxcl_optimal_solver::optimal::VStarTable;
-use zxcl_optimal_solver::score::{Cost, Weights};
+use solver::graph::{Graph, MAX_HASH};
+use solver::optimal::VStarTable;
+use solver::score::{Cost, Weights};
 
 /// Shared immutable resources that outlive every query.
 pub struct SessionCtx<'a, T: Cost> {

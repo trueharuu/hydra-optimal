@@ -5,10 +5,10 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use query::SearchConfig;
 use repl::{run as run_repl, run_single_query, SessionCtx};
+use solver::graph::{Graph, MAX_HASH};
+use solver::optimal::VStarTable;
+use solver::score::{Cost, WeightedCost, Weights};
 use std::path::PathBuf;
-use zxcl_optimal_solver::graph::{Graph, MAX_HASH};
-use zxcl_optimal_solver::optimal::VStarTable;
-use zxcl_optimal_solver::score::{Cost, WeightedCost, Weights};
 
 const VERSION: &str = "0.4.20240203";
 
@@ -164,7 +164,7 @@ fn run<T: Cost>(cli: Cli) -> Result<()> {
         None => 0,
     };
 
-    let placed = zxcl_optimal_solver::helpers::placed_count(graph.hash(field))?;
+    let placed = solver::helpers::placed_count(graph.hash(field))?;
 
     let config = SearchConfig {
         boolean: cli.boolean,

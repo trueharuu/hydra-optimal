@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
 use std::io::{self, BufWriter, Write};
-use zxcl_optimal_solver::decision::DecisionSearch;
-use zxcl_optimal_solver::graph::Graph;
-use zxcl_optimal_solver::optimal::{OptimalSearch, OptimalSolution, VStarTable};
-use zxcl_optimal_solver::optimal_dag::ExactDagSolution;
-use zxcl_optimal_solver::score::{Cost, Weights};
-use zxcl_optimal_solver::search::Search;
+use solver::decision::DecisionSearch;
+use solver::graph::Graph;
+use solver::optimal::{OptimalSearch, OptimalSolution, VStarTable};
+use solver::optimal_dag::ExactDagSolution;
+use solver::score::{Cost, Weights};
+use solver::search::Search;
 
 /// The mode flags that select which search variant and output behavior to use.
 #[derive(Clone, Copy)]

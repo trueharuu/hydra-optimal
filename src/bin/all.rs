@@ -7,11 +7,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use zxcl_optimal_solver::decision::DecisionSearch;
-use zxcl_optimal_solver::graph::Graph;
-use zxcl_optimal_solver::helpers::{make_cutoffs, parse_query_bag, parse_queue};
-use zxcl_optimal_solver::score::{WeightedCost, Weights};
-use zxcl_optimal_solver::search::Search;
+use solver::decision::DecisionSearch;
+use solver::graph::Graph;
+use solver::helpers::{make_cutoffs, parse_query_bag, parse_queue};
+use solver::score::{WeightedCost, Weights};
+use solver::search::Search;
 
 const ORDER: &str = "TIJLOSZ";
 
@@ -98,7 +98,11 @@ fn render_progress(shared: &Shared) {
         done as f64 / total as f64 * 100.0
     };
     let elapsed = shared.start.elapsed().as_secs_f64();
-    let rate = if elapsed > 0.0 { done as f64 / elapsed } else { 0.0 };
+    let rate = if elapsed > 0.0 {
+        done as f64 / elapsed
+    } else {
+        0.0
+    };
     let eta = if rate > 0.0 {
         (total - done) as f64 / rate
     } else {
@@ -175,7 +179,7 @@ impl Ctx {
         let hold = pieces[0];
         let bag = parse_query_bag(&task.r.to_string(), &pieces, 7)?;
 
-        let dir = self.out_dir.join(task.pc.to_string());
+        let dir = self.out_dir.join(task.pc.to_string()).join(&task.name);
         let path = dir.join(format!("{}.js", task.queue));
 
         if path.exists() {
@@ -305,10 +309,7 @@ fn run(config: &Config) -> Result<()> {
         let mut name_start = task_start;
         while name_start < pc_end {
             let name = &tasks[name_start].name;
-            *shared
-                .current_name
-                .lock()
-                .expect("poisoned current name") = name.clone();
+            *shared.current_name.lock().expect("poisoned current name") = name.clone();
             let name_tasks = tasks[name_start..pc_end]
                 .iter()
                 .take_while(|t| t.name == *name)

@@ -310,6 +310,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
+name = "solver"
+version = "0.4.20260903"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dashmap",
+ "hashbrown",
+ "libc",
+ "memmap2",
+ "rayon",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -388,17 +401,4 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
-]
-
-[[package]]
-name = "zxcl-optimal-solver"
-version = "0.4.20240203"
-dependencies = [
- "anyhow",
- "clap",
- "dashmap",
- "hashbrown",
- "libc",
- "memmap2",
- "rayon",
 ]
