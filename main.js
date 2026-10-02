@@ -1,9 +1,9 @@
+const PIECE_CHARS = "IJLOSTZ";
 const PIECE_SIZE = 4;
 const PC_HEIGHT = 4;
 const FIELD_HEIGHT = PIECE_SIZE + PC_HEIGHT;
 const FIELD_WIDTH = 10;
 const PIECE_SHAPES = 7;
-const PC_PIECES = PC_HEIGHT * FIELD_WIDTH / PIECE_SIZE;
 
 const MINO_TABLE = [
     [
@@ -197,6 +197,7 @@ function interpolate(f1, f2, shape) {
     }
 }
 
+// Reveal-piece glyphs used as the clickable buttons for choosing a child branch.
 const PIECE_FIELDS = [
     new Field(535296000, 0),
     new Field(206360015100, 1),
@@ -207,92 +208,122 @@ const PIECE_FIELDS = [
     new Field(257949757500, 6)
 ];
 
+let data;
+let init_hash;
+let node_pool = [];
+
+function shape_index(ch) {
+    return PIECE_CHARS.indexOf(ch);
+}
+
+// Rebuild the display field for `to_hash` with the last-placed piece (`piece_char`)
+// colored in, interpolated from `from_hash`. The tree hashes are graph hashes (the field
+// after the placement and any line clears), so the target is compared without re-clearing.
+function placed_field(from_hash, piece_char, to_hash) {
+    let f = new Field(from_hash);
+    f.clear_lines();
+    let f2 = new Field(to_hash);
+    let p = interpolate(f, f2, shape_index(piece_char));
+    if (p === undefined) {
+        return f2;
+    }
+    f.place(p);
+    return f;
+}
+
+function leaf_value(obj) {
+    if (obj === null || obj === undefined) {
+        return "...";
+    }
+    if (typeof obj === "number") {
+        return obj.toFixed(12).replace(/\.?0+$/, "");
+    }
+    return String(obj.value);
+}
+
+// A compact view of the next placement in `obj`'s subtree.
 function preview(prev_hash, obj) {
-    if (obj[0] === null) {
+    if (obj === null || obj === undefined) {
         return "?";
     }
-    if (obj[0] === -1) {
-        return (new Field(prev_hash)).disp();
+    if (typeof obj === "number") {
+        return `<p>${leaf_value(obj)}</p>`;
     }
-    if (!Array.isArray(obj[0])) {
-        let f = new Field(prev_hash);
-        f.clear_lines();
-        let f2 = new Field(obj[0]);
-        f2.clear_lines();
-        let p = interpolate(f, f2, obj[1]);
-        f.place(p);
-        return f.disp();
+    if (obj.capped === true) {
+        return `<p>capped</p>`;
     }
-    let f = new Field(prev_hash);
-    f.clear_lines();
-    let f2 = new Field(obj[1][0]);
-    f2.clear_lines();
-    let p = interpolate(f, f2, obj[1][1]);
-    f.place(p);
-    return f.disp();
+    if (obj.steps !== undefined) {
+        if (obj.steps.length === 0) {
+            return (new Field(prev_hash)).disp();
+        }
+        return placed_field(prev_hash, obj.steps[0].piece, obj.steps[0].hash).disp();
+    }
+    return placed_field(prev_hash, obj.piece, obj.hash).disp();
 }
 
 function disp_options(prev_hash, obj) {
-    if (obj == null) {
-        document.getElementById("results").innerHTML = "How Did We Get Here?";
-        return;
+    if (data === undefined) {
+        init_hash = tree_data.init_hash;
+        data = tree_data.root;
     }
-    if (obj[0] === -1) {
-        document.getElementById("results").innerHTML = (
-            `${(new Field(prev_hash)).disp()}<p>No solution :(</p>`
-        );
-        return;
+    if (obj === undefined) {
+        obj = data;
     }
-    if (!Array.isArray(obj[0])) {
+    if (prev_hash === undefined) {
+        prev_hash = init_hash;
+    }
+    node_pool = [];
+    document.getElementById("results").innerHTML = render_tree(prev_hash, obj);
+}
+
+function render_tree(prev_hash, obj) {
+    if (obj === null || obj === undefined) {
+        return "How Did We Get Here?";
+    }
+    if (typeof obj === "number") {
+        return `${(new Field(prev_hash)).disp()}<p>${leaf_value(obj)}</p>`;
+    }
+    if (obj.capped === true) {
+        return `${(new Field(prev_hash)).disp()}<p>capped ${leaf_value(obj)}</p>`;
+    }
+    if (obj.steps !== undefined) {
+        let r = prev_hash;
+        let fields = [];
+        for (let x of obj.steps) {
+            let f = placed_field(r, x.piece, x.hash);
+            fields.push(f.disp());
+            r = x.hash;
+        }
         let f = new Field(prev_hash);
         f.clear_lines();
-        let f2 = new Field(obj[0]);
-        f2.clear_lines();
-        let p = interpolate(f, f2, obj[1]);
-        f.place(p);
-        let fields = [];
-        glob_array = obj[3];
-        for (let shape = 0; shape < PIECE_SHAPES; shape++) {
-            if (obj[3][shape] != null) {
-                fields.push(
-                    `<div>` +
-                    PIECE_FIELDS[shape].disp(`disp_options(${obj[0]}, glob_array[${shape}])`) +
-                    `<br>` +
-                    preview(obj[0], obj[3][shape]) +
-                    `<p>${Array.isArray(obj[3][shape][0]) ? -obj[3][shape][0][0] : -obj[3][shape][2]}</div>`
-                );
-            }
-            else {
-                fields.push(
-                    `<div>` +
-                    (new Field(PIECE_FIELDS[shape].hash())).disp() +
-                    `<p> </p></div>`
-                );
-            }
-        }
-        document.getElementById("results").innerHTML = (
-            `${f.disp()}<p>${-obj[2]}</p><br>` +
-            `<div class="grid">${fields.join("")}</div>`
-        );
-        return;
+        return `${f.disp()}<p>${obj.value}</p><br>` +
+            `<div class="grid">${fields.join("")}</div>`;
     }
-    let r = prev_hash;
+
+    let f = placed_field(prev_hash, obj.piece, obj.hash);
     let fields = [];
-    for (let x of obj.slice(1)) {
-        let f1 = new Field(r);
-        f1.clear_lines();
-        let f2 = new Field(x[0]);
-        f2.clear_lines();
-        let p = interpolate(f1, f2, x[1]);
-        f1.place(p);
-        fields.push(f1.disp());
-        r = x[0];
+    for (let shape = 0; shape < PIECE_SHAPES; shape++) {
+        let ch = PIECE_CHARS[shape];
+        let child = (obj.children || {})[ch];
+        if (child !== undefined) {
+            node_pool.push(child);
+            let id = node_pool.length - 1;
+            fields.push(
+                `<div>` +
+                PIECE_FIELDS[shape].disp(`disp_options(${obj.hash}, node_pool[${id}])`) +
+                `<br>` +
+                preview(obj.hash, child) +
+                `<p>${leaf_value(child)}</div>`
+            );
+        }
+        else {
+            fields.push(
+                `<div>` +
+                PIECE_FIELDS[shape].disp() +
+                `<p> </p></div>`
+            );
+        }
     }
-    let f = new Field(prev_hash);
-    f.clear_lines()
-    document.getElementById("results").innerHTML = (
-        `${f.disp()}<p>${-obj[0][0]}</p><br>` +
-        `<div class="grid">${fields.join("")}</div>`
-    );
-    return;
+    return `${f.disp()}<p>${obj.value}</p><br>` +
+        `<div class="grid">${fields.join("")}</div>`;
 }
